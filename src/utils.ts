@@ -113,15 +113,15 @@ export async function unstashFiles(dir: string, dest: string): Promise<void> {
   const promises = files.map(async filename => {
     const tmpFile = path.join(tmpDir, filename);
     const targetPath = path.join(dest, filename);
-    const isDir = fs.lstatSync(tmpFile).isDirectory();
+    const isDir = (await fs.lstat(tmpFile)).isDirectory();
     if (isDir) {
       await fs.copy(tmpFile, targetPath);
       await fs.remove(tmpFile);
     } else {
       if (filename !== TEMPLATE_NAME) {
-        fs.copyFileSync(tmpFile, targetPath);
+        await fs.copyFile(tmpFile, targetPath);
       }
-      fs.unlinkSync(tmpFile);
+      await fs.unlink(tmpFile);
     }
   });
   await Promise.all(promises);

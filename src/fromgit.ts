@@ -4,9 +4,9 @@
 import fs from 'fs-extra';
 import path from 'path';
 import EventEmitter from 'events';
-import { exec, stashFiles, debug } from './utils.js';
+import { exec, debug } from './utils.js';
 import VError from 'verror';
-import { prompt, readConfiguration, renderTemplate } from './template.js';
+import { prompt, readConfiguration, renderTemplate, rmConfiguration } from './template.js';
 
 export type Cache = Record<string, string>;
 
@@ -21,7 +21,6 @@ export interface GitRef {
 }
 
 export interface Options {
-  cache?: boolean;
   force?: boolean;
   verbose?: boolean;
   prompt?: boolean;
@@ -30,7 +29,6 @@ export interface Options {
 
 function DEFAULT_OPTIONS(): Options {
   return {
-    cache: false,
     force: false,
     verbose: false,
     prompt: true,
@@ -53,40 +51,29 @@ export interface RenderOptions {
 class FromGit extends EventEmitter {
   src: string;
 
-  cache: boolean;
-  verbose: boolean;
-  force: boolean;
   proxy?: string;
   opts: Options;
-
-  repo: Repository;
 
   constructor(src: string, opts: Options = DEFAULT_OPTIONS()) {
     super();
 
     this.src = src;
-    this.cache = opts.cache || false;
-    this.force = opts.force || false;
-    this.verbose = opts.verbose || false;
     this.opts = opts;
+    this.opts.ref ||= 'HEAD';
     this.proxy = process.env.https_proxy; // TODO allow setting via --proxy
-
-    this.repo = { url: src, ref: opts.ref || 'HEAD' };
   }
 
   async clone(dest: string) {
-    this._checkDirIsEmpty(dest);
-
-    const repo = this.repo;
+    if (!(await this.shouldContinue(dest))) return;
 
     await this._cloneWithGit(dest);
 
     this._info({
       code: 'SUCCESS',
-      message: `cloned ${repo.url}#${repo.ref}${dest !== '.' ? ` to ${dest}` : ''}`,
-      repo,
+      message: `cloned ${this.src}#${this.opts.ref}${dest !== '.' ? ` to ${dest}` : ''}`,
       dest,
     });
+    await this.render(dest);
   }
 
   async remove(dir: string, dest: string, action: RemoveOptions) {
@@ -97,12 +84,12 @@ class FromGit extends EventEmitter {
     const promises = files.map(async (file: string) => {
       const filePath = path.resolve(dest, file);
       if (fs.existsSync(filePath)) {
-        const isDir = fs.lstatSync(filePath).isDirectory();
+        const isDir = (await fs.lstat(filePath)).isDirectory();
         if (isDir) {
           await fs.remove(filePath);
           return file + '/';
         } else {
-          fs.unlinkSync(filePath);
+          await fs.unlink(filePath);
           return file;
         }
       } else {
@@ -127,36 +114,42 @@ class FromGit extends EventEmitter {
   async render(dest: string): Promise<void> {
     const templateConfig = await readConfiguration(dest);
 
-    const data = await prompt(templateConfig.variables, !this.opts.prompt);
+    const data = await prompt(templateConfig.variables, this.opts.prompt === false);
 
     for (const template of templateConfig.templates || []) {
       await renderTemplate(dest, template, data);
     }
+
+    await rmConfiguration(dest);
   }
 
-  _checkDirIsEmpty(dir: string) {
+  private async shouldContinue(dir: string): Promise<boolean> {
+    let files = [];
     try {
-      const files = fs.readdirSync(dir);
-      if (files.length > 0) {
-        if (this.force) {
-          this._info({
-            code: 'DEST_NOT_EMPTY',
-            message: `destination directory is not empty. Using options.force, continuing`,
-          });
-        } else {
-          throw new VError(`destination directory is not empty, aborting. Use options.force to override`, {
-            code: 'DEST_NOT_EMPTY',
-          });
-        }
-      } else {
-        this._verbose({
-          code: 'DEST_IS_EMPTY',
-          message: `destination directory is empty`,
-        });
-      }
-    } catch (err: any) {
-      if (err?.code !== 'ENOENT') throw err;
+      files = await fs.readdir(dir);
+    } catch (e: any) {
+      if (e?.code === 'ENOENT') return true;
     }
+
+    if (files.length > 0) {
+      if (this.opts.force) {
+        this._info({
+          code: 'DEST_NOT_EMPTY',
+          message: `destination directory is not empty. Using options.force, continuing`,
+        });
+      } else {
+        this._info({
+          code: 'DEST_NOT_EMPTY',
+          message: `destination directory is not empty. Use options.force to override. Aborting`,
+        });
+        return false;
+      }
+    }
+    this._verbose({
+      code: 'DEST_IS_EMPTY',
+      message: `destination directory is empty`,
+    });
+    return true;
   }
 
   _info(info: any) {
@@ -171,7 +164,7 @@ class FromGit extends EventEmitter {
 
   _verbose(info: any) {
     debug(info);
-    if (this.verbose) this._info(info);
+    if (this.opts.verbose) this._info(info);
   }
 
   async _getHash(repo: Repository, cached: Cache): Promise<string | undefined> {
@@ -218,9 +211,9 @@ class FromGit extends EventEmitter {
   }
 
   async _cloneWithGit(dest: string) {
-    await exec(`git clone ${this.repo.url} ${dest}`);
-    if (this.repo.ref !== 'HEAD') {
-      await exec(`git --git-dir=${dest}/.git --work-tree=${dest} checkout ${this.repo.ref}`);
+    await exec(`git clone ${this.src} ${dest}`);
+    if (this.opts.ref !== 'HEAD') {
+      await exec(`git --git-dir=${dest}/.git --work-tree=${dest} checkout ${this.opts.ref}`);
     }
     await fs.remove(path.resolve(dest, '.git'));
   }

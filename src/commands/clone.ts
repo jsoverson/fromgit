@@ -6,12 +6,12 @@ import { prompt, readConfiguration, renderTemplate, rmConfiguration } from '../t
 interface Options {
   url: string;
   directory: string;
-  branch?: string;
+  ref?: string;
   subdirectory?: string;
 }
 
 export const definition: CommandModule<unknown, Options> = {
-  command: `clone <url> [options]`,
+  command: `$0 <url> <directory> [options]`,
   describe: 'Start a new project from the passed repository',
   builder: (yargs: Argv): Argv<Options> => {
     return yargs
@@ -26,17 +26,18 @@ export const definition: CommandModule<unknown, Options> = {
         description: 'The directory to clone into',
       })
       .options({
-        branch: { type: 'string', description: 'Operation to call inside the wasm module' },
-        subdirectory: { type: 'string', description: 'Operation to call inside the wasm module' },
+        ref: { type: 'string', description: 'Reference or branch to check out' },
+        silent: { type: 'boolean', description: 'Enable to disable interactive prompt for project variables' },
+        subdirectory: { type: 'string', description: 'Subdirectory to use as the template root' },
       })
       .example(
-        `clone https://github.com/chromaui/intro-storybook-vue-template .`,
+        `$0 https://github.com/chromaui/intro-storybook-vue-template .`,
         'Clones intro-storybook-vue-template into the current directory',
       );
   },
   async handler(args: Arguments<Options>): Promise<void> {
-    debug('clone');
-
-    await fromgit(args.url, args.directory);
+    debug('Processing clone command');
+    const prompt = !args.silent;
+    await fromgit(args.url, args.directory, { ref: args.ref, prompt });
   },
 };
