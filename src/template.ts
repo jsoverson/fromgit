@@ -41,9 +41,7 @@ export async function rmConfiguration(dir: string, file = '.template'): Promise<
 export async function renderTemplate(dir: string, file: string, data: Record<string, unknown>): Promise<void> {
   const filePath = path.join(dir, file);
   const templateSource = await fs.readFile(filePath, 'utf-8');
-  console.log(templateSource);
   const output = ejs.render(templateSource, data);
-  console.log(output);
   await fs.writeFile(filePath, output);
 }
 
@@ -53,6 +51,10 @@ export async function renameFiles(dir: string, files: Record<string, string>): P
   }
 }
 
-export async function prompt(variables: PromptVariables[]): Promise<Record<string, unknown>> {
-  return prompts(variables);
+export async function prompt(variables: PromptVariables[], silent = false): Promise<Record<string, unknown>> {
+  if (silent) {
+    return Object.fromEntries(variables.map(v => [v.name, v.initial]));
+  } else {
+    return prompts(variables);
+  }
 }

@@ -3,21 +3,16 @@
 
 import fs from 'fs-extra';
 import path from 'path';
-import tar from 'tar';
 import EventEmitter from 'events';
-import chalk from 'chalk';
-import { exec, fetch, mkdirp, tryRequire, stashFiles, base, debug } from './utils.js';
+import { exec, stashFiles, debug } from './utils.js';
 import VError from 'verror';
-
-const validModes = new Set(['tar', 'git']);
+import { prompt, readConfiguration, renderTemplate } from './template.js';
 
 export type Cache = Record<string, string>;
 
 export function fromgit(src: string, opts?: Options): FromGit {
   return new FromGit(src, opts);
 }
-
-export type Mode = 'tar' | 'git';
 
 export interface GitRef {
   type: string;
@@ -29,8 +24,8 @@ export interface Options {
   cache?: boolean;
   force?: boolean;
   verbose?: boolean;
-  mode: Mode;
-  // proxy: string;
+  prompt?: boolean;
+  ref?: string;
 }
 
 function DEFAULT_OPTIONS(): Options {
@@ -38,36 +33,21 @@ function DEFAULT_OPTIONS(): Options {
     cache: false,
     force: false,
     verbose: false,
-    mode: 'git',
+    prompt: true,
   };
 }
 
 export interface Repository {
-  mode: Mode;
-  site: string;
-  user: string;
-  name: string;
-  subdir: string;
-  ssh: string;
   url: string;
   ref: string;
 }
 
-export type DirectiveClone = (dir: string, dest: string, action: CloneOptions) => Promise<void>;
-export interface CloneOptions {
-  cache?: boolean;
-  force?: boolean;
-  verbose?: boolean;
-  mode: Mode;
-  src: string;
-}
-export type DirectiveRemove = (dir: string, dest: string, action: RemoveOptions) => Promise<void>;
 export interface RemoveOptions {
   files: string[] | string;
 }
-export interface DirectiveActions {
-  clone: DirectiveClone;
-  remove: DirectiveRemove;
+
+export interface RenderOptions {
+  silent?: boolean;
 }
 
 class FromGit extends EventEmitter {
@@ -77,13 +57,9 @@ class FromGit extends EventEmitter {
   verbose: boolean;
   force: boolean;
   proxy?: string;
+  opts: Options;
 
   repo: Repository;
-
-  private _hasStashed: boolean;
-  private directiveActions: DirectiveActions;
-
-  mode: Mode;
 
   constructor(src: string, opts: Options = DEFAULT_OPTIONS()) {
     super();
@@ -92,64 +68,22 @@ class FromGit extends EventEmitter {
     this.cache = opts.cache || false;
     this.force = opts.force || false;
     this.verbose = opts.verbose || false;
+    this.opts = opts;
     this.proxy = process.env.https_proxy; // TODO allow setting via --proxy
 
-    this.repo = parse(src);
-    this.mode = opts.mode || this.repo.mode;
-
-    if (!validModes.has(this.mode)) {
-      throw new Error(`Valid modes are ${Array.from(validModes).join(', ')}`);
-    }
-
-    this._hasStashed = false;
-
-    this.directiveActions = {
-      clone: async (dir, dest, action) => {
-        if (this._hasStashed === false) {
-          stashFiles(dir, dest);
-          this._hasStashed = true;
-        }
-        const opts = Object.assign(
-          { force: true, mode: 'git' },
-          { cache: action.cache, verbose: action.verbose },
-        ) as CloneOptions;
-        const d = fromgit(action.src, opts);
-
-        d.on('info', event => {
-          console.error(chalk.cyan(`> ${event.message.replace('options.', '--')}`));
-        });
-
-        d.on('warn', event => {
-          console.error(chalk.magenta(`! ${event.message.replace('options.', '--')}`));
-        });
-
-        await d.clone(dest).catch(err => {
-          console.error(chalk.red(`! ${err.message}`));
-          process.exit(1);
-        });
-      },
-      remove: this.remove.bind(this),
-    };
+    this.repo = { url: src, ref: opts.ref || 'HEAD' };
   }
 
   async clone(dest: string) {
     this._checkDirIsEmpty(dest);
 
-    const { repo } = this;
+    const repo = this.repo;
 
-    const dir = path.join(base, repo.site, repo.user, repo.name);
-
-    if (this.mode === 'tar') {
-      await this._cloneWithTar(dir, dest);
-    } else {
-      await this._cloneWithGit(dir, dest);
-    }
+    await this._cloneWithGit(dest);
 
     this._info({
       code: 'SUCCESS',
-      message: `cloned ${chalk.bold(repo.user + '/' + repo.name)}#${chalk.bold(repo.ref)}${
-        dest !== '.' ? ` to ${dest}` : ''
-      }`,
+      message: `cloned ${repo.url}#${repo.ref}${dest !== '.' ? ` to ${dest}` : ''}`,
       repo,
       dest,
     });
@@ -174,7 +108,7 @@ class FromGit extends EventEmitter {
       } else {
         this._warn({
           code: 'FILE_DOES_NOT_EXIST',
-          message: `action wants to remove ${chalk.bold(file)} but it does not exist`,
+          message: `action wants to remove '${file}' but it does not exist`,
         });
         return null;
       }
@@ -185,8 +119,18 @@ class FromGit extends EventEmitter {
     if (removedFiles.length > 0) {
       this._info({
         code: 'REMOVED',
-        message: `removed: ${chalk.bold(removedFiles.map(d => chalk.bold(d)).join(', '))}`,
+        message: `removed: ${removedFiles.join(', ')}`,
       });
+    }
+  }
+
+  async render(dest: string): Promise<void> {
+    const templateConfig = await readConfiguration(dest);
+
+    const data = await prompt(templateConfig.variables, !this.opts.prompt);
+
+    for (const template of templateConfig.templates || []) {
+      await renderTemplate(dest, template, data);
     }
   }
 
@@ -216,14 +160,17 @@ class FromGit extends EventEmitter {
   }
 
   _info(info: any) {
+    debug(info);
     this.emit('info', info);
   }
 
   _warn(info: any) {
+    debug(info);
     this.emit('warn', info);
   }
 
   _verbose(info: any) {
+    debug(info);
     if (this.verbose) this._info(info);
   }
 
@@ -270,125 +217,13 @@ class FromGit extends EventEmitter {
     }
   }
 
-  async _cloneWithTar(dir: string, dest: string) {
-    const { repo } = this;
-
-    const cached = (tryRequire(path.join(dir, 'map.json')) as Cache) || {};
-
-    const hash = this.cache ? this._getHashFromCache(repo, cached) : await this._getHash(repo, cached);
-
-    const subdir = repo.subdir ? `${repo.name}-${hash}${repo.subdir}` : '';
-
-    if (!hash) {
-      // TODO 'did you mean...?'
-      throw new VError(`could not find commit hash for ${repo.ref}`, {
-        code: 'MISSING_REF',
-        ref: repo.ref,
-      });
+  async _cloneWithGit(dest: string) {
+    await exec(`git clone ${this.repo.url} ${dest}`);
+    if (this.repo.ref !== 'HEAD') {
+      await exec(`git --git-dir=${dest}/.git --work-tree=${dest} checkout ${this.repo.ref}`);
     }
-
-    const file = `${dir}/${hash}.tar.gz`;
-    const url =
-      repo.site === 'gitlab'
-        ? `${repo.url}/repository/archive.tar.gz?ref=${hash}`
-        : repo.site === 'bitbucket'
-        ? `${repo.url}/get/${hash}.tar.gz`
-        : `${repo.url}/archive/${hash}.tar.gz`;
-
-    try {
-      if (!this.cache) {
-        try {
-          fs.statSync(file);
-          this._verbose({
-            code: 'FILE_EXISTS',
-            message: `${file} already exists locally`,
-          });
-        } catch (err) {
-          mkdirp(path.dirname(file));
-
-          if (this.proxy) {
-            this._verbose({
-              code: 'PROXY',
-              message: `using proxy ${this.proxy}`,
-            });
-          }
-
-          this._verbose({
-            code: 'DOWNLOADING',
-            message: `downloading ${url} to ${file}`,
-          });
-
-          await fetch(url, file, this.proxy);
-        }
-      }
-    } catch (err) {
-      throw new VError(`could not download ${url}`, {
-        code: 'COULD_NOT_DOWNLOAD',
-        url,
-        original: err,
-      });
-    }
-
-    updateCache(dir, repo, hash, cached);
-
-    this._verbose({
-      code: 'EXTRACTING',
-      message: `extracting ${subdir ? repo.subdir + ' from ' : ''}${file} to ${dest}`,
-    });
-
-    mkdirp(dest);
-    await untar(file, dest, subdir);
+    await fs.remove(path.resolve(dest, '.git'));
   }
-
-  async _cloneWithGit(dir: string, dest: string) {
-    await exec(`git clone ${this.repo.ssh} ${dest}`);
-    await exec(`rm -rf ${path.resolve(dest, '.git')}`);
-  }
-}
-
-const supported = new Set(['github', 'gitlab', 'bitbucket', 'git.sr.ht']);
-
-function parse(src: string): Repository {
-  const match =
-    /^(?:(?:https:\/\/)?([^:/]+\.[^:/]+)\/|git@([^:/]+)[:/]|([^/]+):)?([^/\s]+)\/([^/\s#]+)(?:((?:\/[^/\s#]+)+))?(?:\/)?(?:#(.+))?/.exec(
-      src,
-    );
-  if (!match) {
-    throw new VError(`could not parse ${src}`, {
-      code: 'BAD_SRC',
-    });
-  }
-
-  const site = (match[1] || match[2] || match[3] || 'github').replace(/\.(com|org)$/, '');
-  if (!supported.has(site)) {
-    throw new VError(`fromgit supports GitHub, GitLab, Sourcehut and BitBucket`, {
-      code: 'UNSUPPORTED_HOST',
-    });
-  }
-
-  const user = match[4];
-  const name = match[5].replace(/\.git$/, '');
-  const subdir = match[6];
-  const ref = match[7] || 'HEAD';
-
-  const domain = `${site}.${site === 'bitbucket' ? 'org' : site === 'git.sr.ht' ? '' : 'com'}`;
-  const url = `https://${domain}/${user}/${name}`;
-  const ssh = `git@${domain}:${user}/${name}`;
-
-  const mode = supported.has(site) ? 'tar' : 'git';
-
-  return { site, user, name, ref, url, ssh, subdir, mode };
-}
-
-async function untar(file: string, dest: string, subdir = '') {
-  return tar.extract(
-    {
-      file,
-      strip: subdir ? subdir.split('/').length : 1,
-      C: dest,
-    },
-    subdir ? [subdir] : [],
-  );
 }
 
 async function fetchRefs(repo: Repository): Promise<GitRef[]> {
@@ -427,36 +262,4 @@ async function fetchRefs(repo: Repository): Promise<GitRef[]> {
       original: error,
     });
   }
-}
-
-function updateCache(dir: string, repo: Repository, hash: string, cached: Cache) {
-  // update access logs
-  const logs = (tryRequire(path.join(dir, 'access.json')) as Record<string, string>) || {};
-  logs[repo.ref] = new Date().toISOString();
-  fs.writeFileSync(path.join(dir, 'access.json'), JSON.stringify(logs, null, '  '));
-
-  if (cached[repo.ref] === hash) return;
-
-  const oldHash = cached[repo.ref];
-  if (oldHash) {
-    let used = false;
-    for (const key in cached) {
-      if (cached[key] === hash) {
-        used = true;
-        break;
-      }
-    }
-
-    if (!used) {
-      // we no longer need this tar file
-      try {
-        fs.unlinkSync(path.join(dir, `${oldHash}.tar.gz`));
-      } catch (err) {
-        // ignore
-      }
-    }
-  }
-
-  cached[repo.ref] = hash;
-  fs.writeFileSync(path.join(dir, 'map.json'), JSON.stringify(cached, null, '  '));
 }

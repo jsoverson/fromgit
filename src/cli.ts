@@ -5,7 +5,6 @@ import { hideBin } from 'yargs/helpers';
 import yargs from 'yargs';
 
 import { definition as newCmd } from './commands/clone.js';
-import chalk from 'chalk';
 
 debug('Starting');
 try {
@@ -18,7 +17,7 @@ try {
   debug('Done processing command');
 } catch (e) {
   debug('Error %o', e);
-  console.error(chalk.red(`Error: ${e}`));
+  console.error(`Error: ${e}`);
   process.exit(1);
 }
 debug('Done with main');
