@@ -35,7 +35,7 @@ describe('fromgit', function () {
     const tmp = await tempPath('test2');
     const repo = 'git@github.com:jsoverson/fromgit-test.git';
     process.env.FROMGIT_NAME = 'test-name';
-    await fromgit(repo, tmp, { prompt: false, ref: 'test-branch' });
+    await fromgit(repo, tmp, { prompt: false, branch: 'test-branch' });
     const exists = (file: string) => fs.existsSync(path.join(tmp, file));
     const get = async (file: string) => fs.readFile(path.join(tmp, file), 'utf-8');
     expect(exists('test.txt')).to.be.false;
