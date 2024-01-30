@@ -31,6 +31,7 @@ async function main() {
             description: 'The directory to clone into',
           })
           .options({
+            path: { type: 'string', description: 'Sub-directory of the git repo to check out' },
             branch: { type: 'string', description: 'Reference or branch to check out' },
             silent: { type: 'boolean', description: 'Enable to disable interactive prompt for project variables' },
           })

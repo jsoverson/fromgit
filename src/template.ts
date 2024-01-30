@@ -5,7 +5,7 @@ import ejs from 'ejs';
 import prompts from 'prompts';
 import { debug } from './utils.js';
 
-interface Prompt {
+export interface Prompt {
   name: string;
   description: string;
   remove?: string[];

@@ -16,7 +16,6 @@ async function tempPath(dir: string): Promise<string> {
 
 describe('fromgit', function () {
   it('should clone the test repo via ssh', async () => {
-    await fs.remove('wapc');
     const tmp = await tempPath('test1');
     const repo = 'git@github.com:jsoverson/fromgit-test.git';
     process.env.FROMGIT_NAME = 'test-name';
@@ -31,7 +30,6 @@ describe('fromgit', function () {
     expect(templated).to.equal('Hello test-name\n');
   });
   it('should clone a branch', async () => {
-    await fs.remove('wapc');
     const tmp = await tempPath('test2');
     const repo = 'git@github.com:jsoverson/fromgit-test.git';
     process.env.FROMGIT_NAME = 'test-name';
@@ -42,5 +40,14 @@ describe('fromgit', function () {
     expect(exists(path.join('src', 'subdir.txt'))).to.be.true;
     const templated = await get('templated.md');
     expect(templated).to.equal('Hello test-name\n');
+  });
+  it('should clone a subdir', async () => {
+    const tmp = await tempPath('test3');
+    const repo = 'git@github.com:jsoverson/fromgit-test.git';
+    process.env.FROMGIT_NAME = 'test-name';
+    await fromgit(repo, tmp, { prompt: false, path: 'src' });
+    const exists = (file: string) => fs.existsSync(path.join(tmp, file));
+    expect(exists('test.txt')).to.be.false;
+    expect(exists('subdir.txt')).to.be.true;
   });
 });

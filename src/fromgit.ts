@@ -4,7 +4,7 @@
 import fs from 'fs-extra';
 import path from 'path';
 import { exec, debug } from './utils.js';
-import { prompt, readConfiguration, renderTemplate, rmConfiguration } from './template.js';
+import { Prompt, prompt, readConfiguration, renderTemplate, rmConfiguration } from './template.js';
 
 export type Cache = Record<string, string>;
 
@@ -13,6 +13,7 @@ export interface Options {
   verbose?: boolean;
   prompt?: boolean;
   branch?: string;
+  path?: string;
 }
 
 function DEFAULT_OPTIONS(): Options {
@@ -49,15 +50,24 @@ export class FromGit {
   }
 
   async render(dest: string): Promise<void> {
-    const templateConfig = await readConfiguration(dest);
-
-    const data = await prompt(templateConfig.variables, this.opts.prompt === false);
-
-    for (const template of templateConfig.templates || []) {
-      await renderTemplate(dest, template, data);
+    if (this.opts.path) {
+      dest = path.join(dest, this.opts.path);
     }
 
-    await rmConfiguration(dest);
+    return await readConfiguration(dest)
+      .then(async (templateConfig: Prompt) => {
+        const data = await prompt(templateConfig.variables, this.opts.prompt === false);
+
+        for (const template of templateConfig.templates || []) {
+          await renderTemplate(dest, template, data);
+        }
+
+        await rmConfiguration(dest);
+      })
+      .catch((e: unknown) => {
+        debug('not rendering .template config (%s)', e);
+        return;
+      });
   }
 
   private async assertShouldContinue(dir: string): Promise<boolean> {
@@ -84,11 +94,19 @@ export class FromGit {
   }
 
   async _cloneWithGit(dest: string): Promise<void> {
+    const finalDest = dest;
+    if (this.opts.path) {
+      dest = '.tmp.fromgit.' + Math.random().toString(36).substring(7);
+    }
     if (this.opts.branch !== undefined) {
       await exec(`git clone -b ${this.opts.branch} --depth=1 ${this.src} ${dest}`);
       await exec(`git --git-dir=${dest}/.git --work-tree=${dest} checkout ${this.opts.branch}`);
     } else {
       await exec(`git clone --depth=1 ${this.src} ${dest}`);
+    }
+    if (this.opts.path) {
+      await fs.move(dest + '/' + this.opts.path, finalDest);
+      await fs.remove(dest);
     }
     await fs.remove(path.resolve(dest, '.git'));
   }
